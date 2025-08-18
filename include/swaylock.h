@@ -69,6 +69,9 @@ struct swaylock_args {
 	bool daemonize;
 	int ready_fd;
 	bool indicator_idle_visible;
+
+	double blur;
+	double opacity;
 };
 
 struct swaylock_password {
@@ -100,6 +103,8 @@ struct swaylock_state {
 	bool run_display, locked;
 	struct ext_session_lock_manager_v1 *ext_session_lock_manager_v1;
 	struct ext_session_lock_v1 *ext_session_lock_v1;
+
+	bool background_image_modifiers_specified_without_being_applied_to_image;
 };
 
 struct swaylock_surface {

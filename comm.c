@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <signal.h>
 #include "comm.h"
 #include "log.h"
 #include "swaylock.h"

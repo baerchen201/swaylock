@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <MagickWand/MagickWand.h>
 #include "background-image.h"
 #include "cairo.h"
 #include "log.h"
@@ -21,36 +22,78 @@ enum background_mode parse_background_mode(const char *mode) {
 	return BACKGROUND_MODE_INVALID;
 }
 
-cairo_surface_t *load_background_image(const char *path) {
-	cairo_surface_t *image;
-#if HAVE_GDK_PIXBUF
-	GError *err = NULL;
-	GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(path, &err);
-	if (!pixbuf) {
-		swaylock_log(LOG_ERROR, "Failed to load background image (%s).",
-				err->message);
+static cairo_status_t
+stdio_read_func (void *closure, unsigned char *data, unsigned int size)
+{
+	FILE *file = closure;
+
+	while (size) {
+		const size_t ret = fread(data, 1, size, file);
+		size -= ret;
+		data += ret;
+
+		if (size && (feof (file) || ferror (file)))
+			return CAIRO_STATUS_READ_ERROR;
+	}
+
+	return CAIRO_STATUS_SUCCESS;
+}
+
+
+cairo_surface_t *load_background_image(const char *path, const double *blur, const double *opacity) {
+	cairo_surface_t *image = NULL;
+
+	FILE *imageFile = fopen(path, "rb");
+	if (imageFile == NULL) {
+		swaylock_log(LOG_ERROR, "Failed to open background image file: %s.",
+				strerror(errno));
 		return NULL;
 	}
-	// Correct for embedded image orientation; typical images are not
-	// rotated and will be handled efficiently
-	GdkPixbuf *oriented = gdk_pixbuf_apply_embedded_orientation(pixbuf);
-	g_object_unref(pixbuf);
-	image = gdk_cairo_image_surface_create_from_pixbuf(oriented);
-	g_object_unref(oriented);
-#else
-	image = cairo_image_surface_create_from_png(path);
-#endif // HAVE_GDK_PIXBUF
-	if (!image) {
-		swaylock_log(LOG_ERROR, "Failed to read background image.");
-		return NULL;
+
+	MagickWandGenesis();
+	MagickWand *wand = NewMagickWand();
+	if (!MagickReadImageFile(wand, imageFile)) {
+		ExceptionType e = MagickGetExceptionType(wand);
+		swaylock_log(LOG_ERROR, "Failed to load background image: %s.",
+				MagickGetException(wand, &e));
+		goto end;
 	}
+	if (MagickGetImageColorspace(wand) == CMYKColorspace)
+		MagickTransformImageColorspace(wand, RGBColorspace);
+
+	if (*blur > 0)
+		MagickGaussianBlurImage(wand, *blur, *blur);
+
+	if (*opacity > 0) {
+		PixelWand *color = NewPixelWand(), *blend = NewPixelWand();
+		const uint16_t actualOpacity = QuantumRange * (*opacity / 100);
+		PixelSetRedQuantum(blend, actualOpacity);
+		PixelSetGreenQuantum(blend, actualOpacity);
+		PixelSetBlueQuantum(blend, actualOpacity);
+		PixelSetAlphaQuantum(blend, actualOpacity);
+
+		PixelSetRedQuantum(color, 0);
+		PixelSetGreenQuantum(color, 0);
+		PixelSetBlueQuantum(color, 0);
+		PixelSetAlphaQuantum(color, QuantumRange);
+
+		MagickColorizeImage(wand, color, blend);
+	}
+
+	FILE *processedImage = tmpfile();
+	MagickWriteImageFile(wand, processedImage);
+	fseek(processedImage, 0, 0);
+
+	image = cairo_image_surface_create_from_png_stream(stdio_read_func, processedImage);
+
+	end:
+	wand = DestroyMagickWand(wand);
+
+	if (!image)
+		return NULL;
 	if (cairo_surface_status(image) != CAIRO_STATUS_SUCCESS) {
-		swaylock_log(LOG_ERROR, "Failed to read background image: %s."
-#if !HAVE_GDK_PIXBUF
-				"\nSway was compiled without gdk_pixbuf support, so only"
-				"\nPNG images can be loaded. This is the likely cause."
-#endif // !HAVE_GDK_PIXBUF
-				, cairo_status_to_string(cairo_surface_status(image)));
+		swaylock_log(LOG_ERROR, "Failed to open background image in cairo: %s.",
+				cairo_status_to_string(cairo_surface_status(image)));
 		return NULL;
 	}
 	return image;
