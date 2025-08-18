@@ -25,6 +25,7 @@
 #include "seat.h"
 #include "swaylock.h"
 #include "ext-session-lock-v1-client-protocol.h"
+#include <MagickWand/MagickWand.h>
 
 static uint32_t parse_color(const char *color) {
 	if (color[0] == '#') {
@@ -389,11 +390,13 @@ static void load_image(char *arg, struct swaylock_state *state) {
 	}
 
 	// Load the actual image
-	image->cairo_surface = load_background_image(image->path);
+	image->cairo_surface = load_background_image(image->path, &state->args.blur, &state->args.opacity);
 	if (!image->cairo_surface) {
 		free(image);
 		return;
 	}
+	state->background_image_modifiers_specified_without_being_applied_to_image = false;
+
 	wl_list_insert(&state->images, &image->link);
 	swaylock_log(LOG_DEBUG, "Loaded image %s for output %s", image->path,
 			image->output_name ? image->output_name : "*");
@@ -540,6 +543,9 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 		{"text-caps-lock-color", required_argument, NULL, LO_TEXT_CAPS_LOCK_COLOR},
 		{"text-ver-color", required_argument, NULL, LO_TEXT_VER_COLOR},
 		{"text-wrong-color", required_argument, NULL, LO_TEXT_WRONG_COLOR},
+
+		{"image-overlay", required_argument, NULL, 'o'},
+		{"blur", required_argument, NULL, 'b'},
 		{0, 0, 0, 0}
 	};
 
@@ -661,7 +667,12 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 		"  --text-ver-color <color>         "
 			"Sets the color of the text when verifying.\n"
 		"  --text-wrong-color <color>       "
-			"Sets the color of the text when invalid.\n"
+			"Sets the color of the text when invalid.\n\n"
+
+		"  -b, --blur <value>               "
+			"Adds a blur effect to the background image.\n"
+		"  -o, --image-overlay <value>      "
+			"Adds a black overlay with the specified opacity over the background image.\n"
 		"\n"
 		"All <color> options are of the form <rrggbb[aa]>.\n";
 
@@ -669,7 +680,7 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 	optind = 1;
 	while (1) {
 		int opt_idx = 0;
-		c = getopt_long(argc, argv, "c:deFfhi:kKLlnrs:tuvC:R:", long_options,
+		c = getopt_long(argc, argv, "c:deFfhi:kKLlnrs:tuvC:R:o:b:", long_options,
 				&opt_idx);
 		if (c == -1) {
 			break;
@@ -943,11 +954,45 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 				state->args.colors.text.wrong = parse_color(optarg);
 			}
 			break;
+
+		case 'b':
+			if (state) {
+				char *endPtr;
+				errno = 0;
+				const long blur = strtol(optarg, &endPtr, 10);
+				if (errno != 0 || *endPtr != 0 || blur > 50 || blur < 0)
+					swaylock_log(LOG_ERROR, "Invalid blur value %s (must be integer between 0 and 50)",
+						   optarg);
+				else {
+					state->args.blur = (double)blur;
+					state->background_image_modifiers_specified_without_being_applied_to_image = true;
+				}
+			}
+			break;
+		case 'o':
+			if (state) {
+				char *endPtr;
+				errno = 0;
+				const long opacity = strtol(optarg, &endPtr, 10);
+				if (errno != 0 || *endPtr != 0 || opacity > 100 || opacity < 0)
+					swaylock_log(LOG_ERROR, "Invalid opacity value %s (must be integer between 0 and 100)",
+						   optarg);
+				else {
+					state->args.opacity = (double)opacity;
+					state->background_image_modifiers_specified_without_being_applied_to_image = true;
+				}
+			}
+			break;
+
 		default:
 			fprintf(stderr, "%s", usage);
 			return 1;
 		}
 	}
+
+	if (state && state->background_image_modifiers_specified_without_being_applied_to_image)
+		swaylock_log(LOG_ERROR,
+				"One or more background image modifiers had no effect. They need to be placed before the image path.\n");
 
 	return 0;
 }
@@ -1113,6 +1158,8 @@ int main(int argc, char **argv) {
 		.show_failed_attempts = false,
 		.indicator_idle_visible = false,
 		.ready_fd = -1,
+
+		.blur = 0,
 	};
 	wl_list_init(&state.images);
 	set_default_colors(&state.args.colors);
@@ -1272,5 +1319,6 @@ int main(int argc, char **argv) {
 	free(state.args.font);
 	cairo_destroy(state.test_cairo);
 	cairo_surface_destroy(state.test_surface);
+	MagickWandTerminus();
 	return 0;
 }
