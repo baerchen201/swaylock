@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -117,12 +118,12 @@ static void destroy_surface(struct swaylock_surface *surface) {
 
 static const struct ext_session_lock_surface_v1_listener ext_session_lock_surface_v1_listener;
 
-static cairo_surface_t *select_image(struct swaylock_state *state,
+static struct swaylock_image *select_image(struct swaylock_state *state,
 		struct swaylock_surface *surface);
 
 static bool surface_is_opaque(struct swaylock_surface *surface) {
 	if (surface->image) {
-		return cairo_surface_get_content(surface->image) == CAIRO_CONTENT_COLOR;
+		return cairo_surface_get_content(surface->image->cairo_surface) == CAIRO_CONTENT_COLOR;
 	}
 	return (surface->state->args.colors.background & 0xff) == 0xff;
 }
@@ -130,7 +131,12 @@ static bool surface_is_opaque(struct swaylock_surface *surface) {
 static void create_surface(struct swaylock_surface *surface) {
 	struct swaylock_state *state = surface->state;
 
-	surface->image = select_image(state, surface);
+	struct swaylock_image *image = select_image(state, surface);
+	if (image == NULL)
+        surface->image = NULL;
+	else
+        surface->image = image;
+	surface->image_changed = false;
 
 	surface->surface = wl_compositor_create_surface(state->compositor);
 	assert(surface->surface);
@@ -309,15 +315,15 @@ void do_sigusr(int sig) {
 	(void)write(sigusr_fds[1], "1", 1);
 }
 
-static cairo_surface_t *select_image(struct swaylock_state *state,
+static struct swaylock_image *select_image(struct swaylock_state *state,
 		struct swaylock_surface *surface) {
 	struct swaylock_image *image;
-	cairo_surface_t *default_image = NULL;
+	struct swaylock_image *default_image = NULL;
 	wl_list_for_each(image, &state->images, link) {
 		if (lenient_strcmp(image->output_name, surface->output_name) == 0) {
-			return image->cairo_surface;
+			return image;
 		} else if (!image->output_name) {
-			default_image = image->cairo_surface;
+			default_image = image;
 		}
 	}
 	return default_image;
@@ -339,6 +345,35 @@ static char *join_args(char **argv, int argc) {
 	res[len - 1] = '\0';
 	return res;
 }
+
+struct image_data {
+	struct swaylock_image *image;
+	struct swaylock_state *state;
+	double *blur;
+	double *opacity;
+};
+
+void *load_image_with_modifiers(void *data) {
+    const struct image_data *image_data = data;
+
+	cairo_surface_t *cairo_surface = load_background_image(image_data->image->path, image_data->blur, image_data->opacity);
+	if (image_data->image == NULL) {
+		swaylock_log(LOG_DEBUG, "Loaded image, but swaylock_image object was deleted");
+		return NULL;
+	}
+	cairo_surface_t *old_cairo_surface = image_data->image->cairo_surface;
+	image_data->image->cairo_surface = cairo_surface;
+	free(old_cairo_surface);
+	swaylock_log(LOG_DEBUG, "Loaded image %s for output %s", image_data->image->path,
+			image_data->image->output_name ? image_data->image->output_name : "*");
+	image_data->image->image_changed = true;
+	damage_state(image_data->state);
+
+	free(data);
+	return NULL;
+}
+
+const double ZERO = 0;
 
 static void load_image(char *arg, struct swaylock_state *state) {
 	// [[<output>]:]<path>
@@ -390,16 +425,30 @@ static void load_image(char *arg, struct swaylock_state *state) {
 	}
 
 	// Load the actual image
-	image->cairo_surface = load_background_image(image->path, &state->args.blur, &state->args.opacity);
+	image->cairo_surface = load_background_image(image->path, &ZERO, &ZERO);
 	if (!image->cairo_surface) {
 		free(image);
 		return;
 	}
-	state->background_image_modifiers_specified_without_being_applied_to_image = false;
+	if (state->args.blur > 0 || state->args.opacity > 0) {
+		swaylock_log(LOG_DEBUG, "Loaded image %s without modifiers for output %s", image->path,
+			image->output_name ? image->output_name : "*");
+		pthread_t thread;
+
+		struct image_data *image_data = malloc(sizeof(struct image_data));
+		image_data->image = image;
+		image_data->state = state;
+		image_data->blur = &state->args.blur;
+		image_data->opacity = &state->args.opacity;
+		pthread_create(&thread, NULL, load_image_with_modifiers, image_data);
+
+		state->background_image_modifiers_specified_without_being_applied_to_image = false;
+	} else {
+		swaylock_log(LOG_DEBUG, "Loaded image %s for output %s", image->path,
+			image->output_name ? image->output_name : "*");
+	}
 
 	wl_list_insert(&state->images, &image->link);
-	swaylock_log(LOG_DEBUG, "Loaded image %s for output %s", image->path,
-			image->output_name ? image->output_name : "*");
 }
 
 static void set_default_colors(struct swaylock_colors *colors) {

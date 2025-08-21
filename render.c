@@ -67,7 +67,10 @@ void render(struct swaylock_surface *surface) {
 	struct pool_buffer buffer;
 
 	if (buffer_width != surface->last_buffer_width ||
-			buffer_height != surface->last_buffer_height) {
+			buffer_height != surface->last_buffer_height ||
+			(surface->image != NULL
+				&& surface->image->image_changed
+				&& !surface->image_changed)) {
 		need_destroy = true;
 		if (!create_buffer(state->shm, &buffer, buffer_width, buffer_height,
 				WL_SHM_FORMAT_ARGB8888)) {
@@ -85,8 +88,10 @@ void render(struct swaylock_surface *surface) {
 		cairo_paint(cairo);
 		if (surface->image && state->args.mode != BACKGROUND_MODE_SOLID_COLOR) {
 			cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
-			render_background_image(cairo, surface->image,
+			render_background_image(cairo, surface->image->cairo_surface,
 				state->args.mode, buffer_width, buffer_height);
+			if (surface->image->image_changed)
+				surface->image_changed = true;
 		}
 		cairo_restore(cairo);
 		cairo_identity_matrix(cairo);

@@ -107,8 +107,18 @@ struct swaylock_state {
 	bool background_image_modifiers_specified_without_being_applied_to_image;
 };
 
+// There is exactly one swaylock_image for each -i argument
+struct swaylock_image {
+	char *path;
+	char *output_name;
+	cairo_surface_t *cairo_surface;
+	struct wl_list link;
+
+	bool image_changed;
+};
+
 struct swaylock_surface {
-	cairo_surface_t *image;
+	struct swaylock_image *image;
 	struct swaylock_state *state;
 	struct wl_output *output;
 	uint32_t output_global_name;
@@ -127,15 +137,10 @@ struct swaylock_surface {
 	struct wl_callback *frame;
 	// Dimensions of last wl_buffer committed to background surface
 	int last_buffer_width, last_buffer_height;
+
+	bool image_changed;
 };
 
-// There is exactly one swaylock_image for each -i argument
-struct swaylock_image {
-	char *path;
-	char *output_name;
-	cairo_surface_t *cairo_surface;
-	struct wl_list link;
-};
 
 void swaylock_handle_key(struct swaylock_state *state,
 		xkb_keysym_t keysym, uint32_t codepoint);
